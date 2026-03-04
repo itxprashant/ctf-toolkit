@@ -1,0 +1,1101 @@
+#!/usr/bin/env python3
+"""
+CTF Toolkit - Interactive TUI Launcher
+
+A curses-based terminal interface to browse and launch all CTF scripts.
+Includes a ranger/yazi-style file browser for tools that need file args.
+
+Install globally:
+    chmod +x ctf
+    sudo ln -sf $(pwd)/ctf /usr/local/bin/ctf
+
+Usage:
+    ./ctf              # Launch interactive TUI
+    ./ctf --list       # List all available tools
+    ./ctf --run <tool> # Run a tool directly (e.g., ctf --run hash_cracker)
+"""
+
+import curses
+import math
+import os
+import stat
+import subprocess
+import sys
+import shutil
+import time
+
+# ─── Tool Registry ───────────────────────────────────────────────────────────
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 'needs_file' marks which <placeholder> tokens should trigger the file browser.
+# When the user presses Enter on a tool, any arg containing a needs_file token
+# will pop up the file browser to fill it in.
+
+CATEGORIES = [
+    {
+        'name': '🔍 Forensics',
+        'description': 'File analysis, metadata, strings, hex viewer, steganography',
+        'tools': [
+            {
+                'name': 'File Analyzer',
+                'script': 'forensics/file_analyzer.py',
+                'description': 'Magic bytes, entropy, hashes, embedded files, trailing data',
+                'quick_args': '<file> --all',
+                'needs_file': ['<file>'],
+            },
+            {
+                'name': 'Metadata Extractor',
+                'script': 'forensics/metadata_extractor.py',
+                'description': 'EXIF (JPEG/GPS), PNG chunks, PDF metadata, flag detection',
+                'quick_args': '<file>',
+                'needs_file': ['<file>'],
+            },
+            {
+                'name': 'Strings Finder',
+                'script': 'forensics/strings_finder.py',
+                'description': 'ASCII/UTF-16 strings with flag pattern highlighting',
+                'quick_args': '<file> --interesting-only',
+                'needs_file': ['<file>'],
+            },
+            {
+                'name': 'Hex Viewer',
+                'script': 'forensics/hex_viewer.py',
+                'description': 'Hex dump with search, highlighting, stdin support',
+                'quick_args': '<file> --length 512',
+                'needs_file': ['<file>'],
+            },
+            {
+                'name': 'Basic Stego',
+                'script': 'forensics/steg_basic.py',
+                'description': 'Simple LSB extraction, bit planes, image diff',
+                'quick_args': 'lsb <image>',
+                'needs_file': ['<image>'],
+            },
+            {
+                'name': 'Advanced Stego',
+                'script': 'forensics/advanced_zsteg.py',
+                'description': 'zsteg-like multi-channel, multi-bit LSB/MSB extraction',
+                'quick_args': '<image>',
+                'needs_file': ['<image>'],
+            },
+            {
+                'name': 'Audio Stego',
+                'script': 'forensics/audio_steg.py',
+                'description': 'High-res spectrograms and WAV LSB extraction',
+                'quick_args': '<file> -s -l',
+                'needs_file': ['<file>'],
+            },
+        ],
+    },
+    {
+        'name': '🔓 Brute Force',
+        'description': 'Hash cracking, archive passwords, wordlists, JWT attacks',
+        'tools': [
+            {
+                'name': 'Hash Cracker',
+                'script': 'bruteforce/hash_cracker.py',
+                'description': 'MD5/SHA1/SHA256/SHA512 wordlist & brute force with mutations',
+                'quick_args': '<hash> --wordlist <wordlist>',
+                'needs_file': ['<wordlist>'],
+            },
+            {
+                'name': 'Archive Cracker',
+                'script': 'bruteforce/archive_cracker.py',
+                'description': 'ZIP & PDF password cracking (wordlist + brute force)',
+                'quick_args': '<file> --wordlist <wordlist>',
+                'needs_file': ['<file>', '<wordlist>'],
+            },
+            {
+                'name': 'Wordlist Generator',
+                'script': 'bruteforce/wordlist_gen.py',
+                'description': 'Pattern-based, mutations, charset combos, word combining',
+                'quick_args': '--base-words admin,password --rules full -o wordlist.txt',
+                'needs_file': [],
+            },
+            {
+                'name': 'JWT Cracker',
+                'script': 'bruteforce/jwt_cracker.py',
+                'description': 'Decode, brute force HMAC secrets, forge tokens',
+                'quick_args': 'decode <token>',
+                'needs_file': [],
+            },
+        ],
+    },
+    {
+        'name': '🔬 Binary Analysis',
+        'description': 'File carving, entropy visualization, firmware analysis',
+        'tools': [
+            {
+                'name': 'File Carver',
+                'script': 'carving/file_carver.py',
+                'description': 'Binwalk alternative — scan & extract embedded files (35+ sigs)',
+                'quick_args': '<file> --extract',
+                'needs_file': ['<file>'],
+            },
+            {
+                'name': 'Entropy Visualizer',
+                'script': 'carving/entropy_visualizer.py',
+                'description': 'Entropy heatmap, region detection, PNG graph output',
+                'quick_args': '<file> --regions',
+                'needs_file': ['<file>'],
+            },
+            {
+                'name': 'Firmware Analyzer',
+                'script': 'carving/firmware_analyzer.py',
+                'description': 'Headers, filesystems, bootloaders, secret scanning',
+                'quick_args': '<file> --all',
+                'needs_file': ['<file>'],
+            },
+        ],
+    },
+    {
+        'name': '🔑 Cryptography',
+        'description': 'RSA attacks, XOR decryptor, encoding/decoding, classical ciphers',
+        'tools': [
+            {
+                'name': 'RSA Toolkit',
+                'script': 'crypto/rsa_toolkit.py',
+                'description': 'Wiener\'s attack, Fermat\'s, Small e, Common Modulus',
+                'quick_args': 'single -n <n> -e <e> -c <c>',
+                'needs_file': [],
+            },
+            {
+                'name': 'XOR Bruteforcer',
+                'script': 'crypto/xor_bruteforcer.py',
+                'description': 'Single-byte frequency analysis, repeating key cracking',
+                'quick_args': '<file> single',
+                'needs_file': ['<file>'],
+            },
+            {
+                'name': 'Magic Decoder',
+                'script': 'crypto/magic_decoder.py',
+                'description': 'Recursive try: Base64/32/58, Hex, Decimal, ROT13, URL',
+                'quick_args': '<file_or_string>',
+                'needs_file': [],
+            },
+            {
+                'name': 'Classical Ciphers',
+                'script': 'crypto/cipher_solver.py',
+                'description': 'Auto-solve Caesar, Vigenère (IoC), and Atbash',
+                'quick_args': '<file_or_string> all',
+                'needs_file': [],
+            },
+        ],
+    },
+    {
+        'name': '🌐 Web Exploitation',
+        'description': 'LFI scanner, SQL injection detector',
+        'tools': [
+            {
+                'name': 'LFI Scanner',
+                'script': 'web/lfi_scanner.py',
+                'description': 'Path traversal payloads, nullbyte injection, PHP wrappers',
+                'quick_args': "'http://target.com/?page=INJECT'",
+                'needs_file': [],
+            },
+            {
+                'name': 'SQLi Probe',
+                'script': 'web/sqli_probe.py',
+                'description': 'Error-based and Time-based blind SQLi detection',
+                'quick_args': "'http://target.com/item.php?id=INJECT'",
+                'needs_file': [],
+            },
+        ],
+    },
+    {
+        'name': '📡 Network Analysis',
+        'description': 'PCAP file extraction, USB PCAP forensics',
+        'tools': [
+            {
+                'name': 'PCAP Extractor',
+                'script': 'network/pcap_extractor.py',
+                'description': 'Dump DNS, plaintext HTTP/FTP credentials, HTTP files',
+                'quick_args': '<file>',
+                'needs_file': ['<file>'],
+            },
+            {
+                'name': 'USB HID Parser',
+                'script': 'network/usb_hid_parser.py',
+                'description': 'Reconstruct keyboard keystrokes and plot mouse movements',
+                'quick_args': '<file> -k -m',
+                'needs_file': ['<file>'],
+            },
+        ],
+    },
+]
+
+# ─── ANSI for non-curses output ───────────────────────────────────────────────
+
+class Col:
+    RED     = '\033[91m'
+    GREEN   = '\033[92m'
+    YELLOW  = '\033[93m'
+    BLUE    = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN    = '\033[96m'
+    BOLD    = '\033[1m'
+    DIM     = '\033[2m'
+    RESET   = '\033[0m'
+
+
+# ─── File Browser ─────────────────────────────────────────────────────────────
+
+class FileBrowser:
+    """Ranger/yazi-style three-column file browser."""
+
+    FILE_ICONS = {
+        '.py':      '🐍', '.js':      '📜', '.sh':      '⚙️ ',
+        '.png':     '🖼️ ', '.jpg':     '🖼️ ', '.jpeg':    '🖼️ ',
+        '.gif':     '🖼️ ', '.bmp':     '🖼️ ', '.webp':    '🖼️ ',
+        '.zip':     '📦', '.gz':      '📦', '.tar':     '📦',
+        '.7z':      '📦', '.rar':     '📦', '.bz2':     '📦',
+        '.pdf':     '📄', '.doc':     '📄', '.txt':     '📝',
+        '.md':      '📝', '.csv':     '📊', '.json':    '📋',
+        '.xml':     '📋', '.html':    '🌐', '.css':     '🎨',
+        '.bin':     '💾', '.img':     '💾', '.iso':     '💿',
+        '.elf':     '⚡', '.exe':     '⚡', '.dll':     '⚡',
+        '.db':      '🗄️ ', '.sqlite':  '🗄️ ', '.sql':     '🗄️ ',
+        '.pem':     '🔑', '.key':     '🔑', '.crt':     '🔑',
+        '.mp3':     '🎵', '.wav':     '🎵', '.flac':    '🎵',
+    }
+
+    def __init__(self, stdscr, start_dir=None, prompt="Select a file"):
+        self.stdscr = stdscr
+        self.cwd = os.path.abspath(start_dir or os.getcwd())
+        self.prompt = prompt
+        self.selected_idx = 0
+        self.scroll_offset = 0
+        self.show_hidden = False
+        self.search_query = ''
+        self.search_mode = False
+        self.entries = []
+        self.parent_entries = []
+
+        self.result = None
+        self._load_entries()
+
+    def _format_size(self, size):
+        if size < 1024:
+            return f"{size}B"
+        elif size < 1024 * 1024:
+            return f"{size/1024:.1f}K"
+        elif size < 1024**3:
+            return f"{size/1024**2:.1f}M"
+        return f"{size/1024**3:.1f}G"
+
+    def _format_perms(self, mode):
+        parts = []
+        for who in (stat.S_IRUSR, stat.S_IWUSR, stat.S_IXUSR,
+                     stat.S_IRGRP, stat.S_IWGRP, stat.S_IXGRP,
+                     stat.S_IROTH, stat.S_IWOTH, stat.S_IXOTH):
+            parts.append('r' if mode & who else '-')
+        # Simplify to rwxrwxrwx
+        chars = ''
+        perms = [(stat.S_IRUSR, 'r'), (stat.S_IWUSR, 'w'), (stat.S_IXUSR, 'x'),
+                 (stat.S_IRGRP, 'r'), (stat.S_IWGRP, 'w'), (stat.S_IXGRP, 'x'),
+                 (stat.S_IROTH, 'r'), (stat.S_IWOTH, 'w'), (stat.S_IXOTH, 'x')]
+        for flag, char in perms:
+            chars += char if mode & flag else '-'
+        return chars
+
+    def _get_icon(self, entry):
+        if entry['is_dir']:
+            return '📁'
+        ext = os.path.splitext(entry['name'])[1].lower()
+        return self.FILE_ICONS.get(ext, '  ')
+
+    def _load_entries(self):
+        """Load directory listing."""
+        try:
+            items = os.listdir(self.cwd)
+        except PermissionError:
+            items = []
+
+        entries = []
+        for name in items:
+            if not self.show_hidden and name.startswith('.'):
+                continue
+            if self.search_query and self.search_query.lower() not in name.lower():
+                continue
+
+            full_path = os.path.join(self.cwd, name)
+            try:
+                st = os.stat(full_path)
+                entries.append({
+                    'name': name,
+                    'path': full_path,
+                    'is_dir': os.path.isdir(full_path),
+                    'size': st.st_size,
+                    'mode': st.st_mode,
+                    'mtime': st.st_mtime,
+                    'is_link': os.path.islink(full_path),
+                })
+            except (OSError, PermissionError):
+                entries.append({
+                    'name': name,
+                    'path': full_path,
+                    'is_dir': False,
+                    'size': 0,
+                    'mode': 0,
+                    'mtime': 0,
+                    'is_link': False,
+                })
+
+        # Sort: directories first, then by name
+        entries.sort(key=lambda e: (not e['is_dir'], e['name'].lower()))
+        self.entries = entries
+
+        # Load parent directory entries
+        parent = os.path.dirname(self.cwd)
+        if parent != self.cwd:
+            try:
+                parent_items = os.listdir(parent)
+                self.parent_entries = sorted([
+                    n for n in parent_items
+                    if not n.startswith('.') or self.show_hidden
+                ])
+            except PermissionError:
+                self.parent_entries = []
+        else:
+            self.parent_entries = []
+
+        # Reset selection if out of bounds
+        if self.selected_idx >= len(self.entries):
+            self.selected_idx = max(0, len(self.entries) - 1)
+
+
+    def draw(self):
+        """Draw the two-column file browser."""
+        h, w = self.stdscr.getmaxyx()
+        self.stdscr.clear()
+
+        # Layout: header(1) + content + footer(2)
+        content_h = h - 3
+        col1_w = max(15, w // 5)           # Parent column
+        col2_w = w - col1_w - 1            # Current directory (rest of width)
+
+        # ── Header bar ────────────────────────────────────────────────────
+        self.stdscr.attron(curses.color_pair(7) | curses.A_BOLD)
+        self.stdscr.addstr(0, 0, ' ' * (w - 1))
+        path_display = f" 📂 {self.cwd}"
+        self.stdscr.addstr(0, 0, path_display[:w-1])
+        self.stdscr.attroff(curses.color_pair(7) | curses.A_BOLD)
+
+        # ── Column border ─────────────────────────────────────────────────
+        for y in range(1, h - 2):
+            try:
+                self.stdscr.addch(y, col1_w, '│', curses.A_DIM)
+            except curses.error:
+                pass
+
+        # ── Column 1: Parent directory ────────────────────────────────────
+        cwd_basename = os.path.basename(self.cwd)
+        for i, name in enumerate(self.parent_entries):
+            if i >= content_h:
+                break
+            y = 1 + i
+            display = name[:col1_w - 1]
+
+            if name == cwd_basename:
+                self.stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+                self.stdscr.addstr(y, 0, display)
+                self.stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+            else:
+                self.stdscr.attron(curses.A_DIM)
+                self.stdscr.addstr(y, 0, display)
+                self.stdscr.attroff(curses.A_DIM)
+
+        # ── Column 2: Current directory ───────────────────────────────────
+        col2_x = col1_w + 1
+        visible_entries = content_h
+
+        # Scroll handling
+        if self.selected_idx >= self.scroll_offset + visible_entries:
+            self.scroll_offset = self.selected_idx - visible_entries + 1
+        elif self.selected_idx < self.scroll_offset:
+            self.scroll_offset = self.selected_idx
+
+        for i in range(visible_entries):
+            entry_idx = self.scroll_offset + i
+            if entry_idx >= len(self.entries):
+                break
+
+            entry = self.entries[entry_idx]
+            y = 1 + i
+            is_selected = (entry_idx == self.selected_idx)
+
+            icon = self._get_icon(entry)
+            name = entry['name']
+
+            # Size string
+            if entry['is_dir']:
+                try:
+                    child_count = len(os.listdir(entry['path']))
+                    size_str = f"{child_count} items"
+                except (PermissionError, OSError):
+                    size_str = "?"
+            else:
+                size_str = self._format_size(entry['size'])
+
+            # Calculate available space
+            name_max = col2_w - len(size_str) - 5
+            if len(name) > name_max:
+                name = name[:name_max - 1] + '…'
+
+            display_line = f" {icon} {name}"
+
+            if is_selected:
+                self.stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
+                padding = col2_w - len(display_line) - len(size_str) - 1
+                if padding < 0:
+                    padding = 0
+                full_line = display_line + ' ' * padding + size_str
+                self.stdscr.addstr(y, col2_x, full_line[:col2_w])
+                self.stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
+            else:
+                if entry['is_dir']:
+                    self.stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+                    self.stdscr.addstr(y, col2_x, display_line[:col2_w - len(size_str) - 1])
+                    self.stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+                elif entry.get('is_link'):
+                    self.stdscr.attron(curses.color_pair(4))
+                    self.stdscr.addstr(y, col2_x, display_line[:col2_w - len(size_str) - 1])
+                    self.stdscr.attroff(curses.color_pair(4))
+                else:
+                    self.stdscr.addstr(y, col2_x, display_line[:col2_w - len(size_str) - 1])
+
+                # Size right-aligned
+                self.stdscr.attron(curses.A_DIM)
+                self.stdscr.addstr(y, col2_x + col2_w - len(size_str) - 1, size_str)
+                self.stdscr.attroff(curses.A_DIM)
+
+        if not self.entries:
+            self.stdscr.attron(curses.A_DIM)
+            self.stdscr.addstr(1, col2_x + 1, "[empty directory]")
+            self.stdscr.attroff(curses.A_DIM)
+
+
+        # ── Footer ────────────────────────────────────────────────────────
+        footer_y = h - 2
+
+        # Prompt line
+        self.stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
+        self.stdscr.addstr(footer_y, 1, f" {self.prompt}")
+        self.stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
+
+        if self.search_mode:
+            self.stdscr.attron(curses.color_pair(4))
+            self.stdscr.addstr(footer_y, len(self.prompt) + 5, f"  filter: {self.search_query}█")
+            self.stdscr.attroff(curses.color_pair(4))
+
+        # Controls bar
+        controls = " ↑↓ Navigate │ Enter Select/Open │ ← Back │ . Hidden │ / Filter │ Esc Cancel "
+        self.stdscr.attron(curses.color_pair(7))
+        self.stdscr.addstr(h - 1, 0, ' ' * (w - 1))
+        self.stdscr.addstr(h - 1, 0, controls[:w-1])
+        self.stdscr.attroff(curses.color_pair(7))
+
+        # Scrollbar indicator
+        if len(self.entries) > visible_entries:
+            scroll_info = f" {self.selected_idx + 1}/{len(self.entries)} "
+            self.stdscr.attron(curses.color_pair(7))
+            try:
+                self.stdscr.addstr(h - 1, w - len(scroll_info) - 1, scroll_info)
+            except curses.error:
+                pass
+            self.stdscr.attroff(curses.color_pair(7))
+
+        self.stdscr.refresh()
+
+    def navigate_up(self):
+        """Go to parent directory."""
+        parent = os.path.dirname(self.cwd)
+        if parent != self.cwd:
+            old_name = os.path.basename(self.cwd)
+            self.cwd = parent
+            self.search_query = ''
+            self._load_entries()
+            # Try to select the directory we came from
+            for i, e in enumerate(self.entries):
+                if e['name'] == old_name:
+                    self.selected_idx = i
+                    break
+            else:
+                self.selected_idx = 0
+            self.scroll_offset = 0
+
+    def navigate_into(self):
+        """Enter selected directory or return selected file."""
+        if not self.entries:
+            return None
+
+        entry = self.entries[self.selected_idx]
+
+        if entry['is_dir']:
+            try:
+                os.listdir(entry['path'])  # Test access
+                self.cwd = entry['path']
+                self.selected_idx = 0
+                self.scroll_offset = 0
+                self.search_query = ''
+                self._load_entries()
+            except PermissionError:
+                pass
+            return None
+        else:
+            return entry['path']
+
+    def run(self):
+        """Run the file browser and return selected file path or None."""
+        self.stdscr.keypad(True)
+
+        while True:
+            self.draw()
+
+            try:
+                key = self.stdscr.getch()
+            except KeyboardInterrupt:
+                return None
+
+            # ── Search mode ───────────────────────────────────────────────
+            if self.search_mode:
+                if key == 27:  # Escape
+                    self.search_mode = False
+                    self.search_query = ''
+                    self._load_entries()
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    self.search_mode = False
+                elif key in (curses.KEY_BACKSPACE, 127, 263):
+                    self.search_query = self.search_query[:-1]
+                    self.selected_idx = 0
+                    self._load_entries()
+                elif 32 <= key <= 126:
+                    self.search_query += chr(key)
+                    self.selected_idx = 0
+                    self._load_entries()
+                continue
+
+            # ── Normal mode ───────────────────────────────────────────────
+            if key == ord('q') or key == 27:  # q or Escape
+                if key == 27:
+                    # Check for escape sequence
+                    self.stdscr.nodelay(True)
+                    nk = self.stdscr.getch()
+                    self.stdscr.nodelay(False)
+                    if nk != -1:
+                        continue  # Was an escape sequence, not bare escape
+                return None
+
+            elif key == curses.KEY_UP or key == ord('k'):
+                self.selected_idx = max(0, self.selected_idx - 1)
+
+            elif key == curses.KEY_DOWN or key == ord('j'):
+                self.selected_idx = min(len(self.entries) - 1, self.selected_idx + 1)
+
+            elif key == curses.KEY_LEFT or key == ord('h'):
+                self.navigate_up()
+
+            elif key in (curses.KEY_RIGHT, ord('l')):
+                result = self.navigate_into()
+                if result:
+                    return result
+
+            elif key in (curses.KEY_ENTER, 10, 13):
+                result = self.navigate_into()
+                if result:
+                    return result
+
+            elif key == ord('.'):
+                self.show_hidden = not self.show_hidden
+                self._load_entries()
+
+            elif key == ord('/'):
+                self.search_mode = True
+                self.search_query = ''
+
+            elif key == ord('~'):
+                self.cwd = os.path.expanduser('~')
+                self.selected_idx = 0
+                self.scroll_offset = 0
+                self._load_entries()
+
+            elif key == ord('g') or key == curses.KEY_HOME:
+                self.selected_idx = 0
+                self.scroll_offset = 0
+
+            elif key == ord('G') or key == curses.KEY_END:
+                self.selected_idx = max(0, len(self.entries) - 1)
+
+            elif key == curses.KEY_PPAGE:  # Page Up
+                h, _ = self.stdscr.getmaxyx()
+                self.selected_idx = max(0, self.selected_idx - (h - 4))
+
+            elif key == curses.KEY_NPAGE:  # Page Down
+                h, _ = self.stdscr.getmaxyx()
+                self.selected_idx = min(len(self.entries) - 1, self.selected_idx + (h - 4))
+
+
+# ─── TUI Application ─────────────────────────────────────────────────────────
+
+class CTFToolkit:
+    def __init__(self, stdscr):
+        self.stdscr = stdscr
+        self.current_view = 'categories'
+        self.selected_category = 0
+        self.selected_tool = 0
+        self.scroll_offset = 0
+        self.message = ''
+        self.setup_colors()
+
+    def setup_colors(self):
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_CYAN, -1)
+        curses.init_pair(2, curses.COLOR_GREEN, -1)
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        curses.init_pair(4, curses.COLOR_MAGENTA, -1)
+        curses.init_pair(5, curses.COLOR_RED, -1)
+        curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLUE)
+        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
+        curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_MAGENTA)
+        curses.curs_set(0)
+
+    def draw_header(self):
+        h, w = self.stdscr.getmaxyx()
+        title = " ⚡ CTF TOOLKIT "
+        self.stdscr.attron(curses.color_pair(7) | curses.A_BOLD)
+        self.stdscr.addstr(0, 0, ' ' * w)
+        self.stdscr.addstr(0, (w - len(title)) // 2, title)
+        self.stdscr.attroff(curses.color_pair(7) | curses.A_BOLD)
+
+    def draw_footer(self):
+        h, w = self.stdscr.getmaxyx()
+        if self.current_view == 'categories':
+            controls = " ↑↓ Navigate │ Enter Select │ q Quit "
+        elif self.current_view == 'tools':
+            cat_name = CATEGORIES[self.selected_category]['name']
+            controls = f" ↑↓ Navigate │ Enter Run │ h Help │ Esc Back │ q Quit │ {cat_name} "
+        else:
+            controls = " Esc Back │ q Quit "
+
+        self.stdscr.attron(curses.color_pair(7))
+        self.stdscr.addstr(h - 1, 0, ' ' * (w - 1))
+        self.stdscr.addstr(h - 1, 0, controls[:w-1])
+        self.stdscr.attroff(curses.color_pair(7))
+
+        if self.message:
+            self.stdscr.attron(curses.color_pair(3))
+            self.stdscr.addstr(h - 2, 2, self.message[:w-4])
+            self.stdscr.attroff(curses.color_pair(3))
+
+    def draw_categories(self):
+        h, w = self.stdscr.getmaxyx()
+        y = 2
+
+        self.stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+        self.stdscr.addstr(y, 2, "Select a category:")
+        self.stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+        y += 2
+
+        for i, cat in enumerate(CATEGORIES):
+            is_selected = (i == self.selected_category)
+            name_text = f" ▶ {cat['name']}" if is_selected else f"   {cat['name']}"
+            name_len = len(name_text) + 3
+
+            if is_selected:
+                self.stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
+                self.stdscr.addstr(y, 2, ' ' * (w - 4))
+                self.stdscr.addstr(y, 3, name_text)
+                self.stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
+
+                desc_space = w - name_len - 6
+                if desc_space > 10:
+                    desc = f"{cat['description']}  ({len(cat['tools'])} tools)"[:desc_space]
+                    self.stdscr.attron(curses.color_pair(6))
+                    self.stdscr.addstr(y, w - len(desc) - 3, desc)
+                    self.stdscr.attroff(curses.color_pair(6))
+            else:
+                self.stdscr.addstr(y, 3, name_text)
+                desc_space = w - name_len - 6
+                if desc_space > 10:
+                    desc = f"{cat['description']}  ({len(cat['tools'])} tools)"[:desc_space]
+                    self.stdscr.attron(curses.A_DIM)
+                    self.stdscr.addstr(y, w - len(desc) - 3, desc)
+                    self.stdscr.attroff(curses.A_DIM)
+
+            y += 1
+            if y >= h - 3:
+                break
+
+    def draw_tools(self):
+        h, w = self.stdscr.getmaxyx()
+        cat = CATEGORIES[self.selected_category]
+        y = 2
+
+        self.stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+        self.stdscr.addstr(y, 2, f"{cat['name']}")
+        self.stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+        y += 1
+        self.stdscr.attron(curses.A_DIM)
+        self.stdscr.addstr(y, 2, "─" * (w - 4))
+        self.stdscr.attroff(curses.A_DIM)
+        y += 2
+
+        for i, tool in enumerate(cat['tools']):
+            if y >= h - 5:
+                break
+
+            is_selected = (i == self.selected_tool)
+            name_text = f" ▶ {tool['name']}" if is_selected else f"   {tool['name']}"
+            name_len = len(name_text) + 3
+
+            if is_selected:
+                self.stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
+                self.stdscr.addstr(y, 2, ' ' * (w - 4))
+                self.stdscr.addstr(y, 3, name_text)
+                self.stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
+
+                desc_space = w - name_len - 6
+                if desc_space > 10:
+                    desc = tool['description'][:desc_space]
+                    self.stdscr.attron(curses.color_pair(6))
+                    self.stdscr.addstr(y, w - len(desc) - 3, desc)
+                    self.stdscr.attroff(curses.color_pair(6))
+            else:
+                self.stdscr.addstr(y, 3, name_text)
+                desc_space = w - name_len - 6
+                if desc_space > 10:
+                    desc = tool['description'][:desc_space]
+                    self.stdscr.attron(curses.A_DIM)
+                    self.stdscr.addstr(y, w - len(desc) - 3, desc)
+                    self.stdscr.attroff(curses.A_DIM)
+            y += 1
+
+        if self.selected_tool < len(cat['tools']):
+            tool = cat['tools'][self.selected_tool]
+            script_path = os.path.join(SCRIPT_DIR, tool['script'])
+            exists = os.path.isfile(script_path)
+
+            # Usage line at bottom
+            usage = f"Usage: python3 {tool['script']} {tool['quick_args']}"
+            y = h - 4
+            self.stdscr.attron(curses.color_pair(4) | curses.A_DIM)
+            self.stdscr.addstr(y, 2, usage[:w-4])
+            self.stdscr.attroff(curses.color_pair(4) | curses.A_DIM)
+
+            # Script status
+            status_color = curses.color_pair(2) if exists else curses.color_pair(5)
+            status_text = " ✓" if exists else " ✗"
+            self.stdscr.attron(status_color)
+            try:
+                self.stdscr.addstr(y, 2 + len(usage[:w-4]) + 1, status_text)
+            except curses.error:
+                pass
+            self.stdscr.attroff(status_color)
+
+    def browse_file(self, placeholder):
+        """Open file browser to select a file for a placeholder."""
+        browser = FileBrowser(self.stdscr, prompt=f"Select {placeholder}")
+        result = browser.run()
+        # Restore our color setup after browser
+        self.setup_colors()
+        return result
+
+    def get_user_input(self, prompt, prefill=''):
+        """Get editable text input with prefill support and cursor at end."""
+        h, w = self.stdscr.getmaxyx()
+        y = h - 3
+
+        input_x = 2 + len(prompt) + 1
+        max_input = w - input_x - 2
+
+        # Initialize buffer with prefill, cursor at end
+        buf = list(prefill[:max_input])
+        cursor = len(buf)
+
+        curses.curs_set(1)
+        curses.noecho()
+        self.stdscr.keypad(True)
+
+        while True:
+            # Clear the input line and redraw
+            self.stdscr.move(y, 2)
+            self.stdscr.clrtoeol()
+
+            # Draw prompt
+            self.stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+            self.stdscr.addstr(y, 2, prompt)
+            self.stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+
+            # Draw buffer text
+            display = ''.join(buf)
+            self.stdscr.addstr(y, input_x, display[:max_input])
+
+            # Position cursor
+            self.stdscr.move(y, input_x + cursor)
+            self.stdscr.refresh()
+
+            try:
+                key = self.stdscr.getch()
+            except KeyboardInterrupt:
+                curses.curs_set(0)
+                return ''
+
+            if key in (curses.KEY_ENTER, 10, 13):  # Enter — confirm
+                break
+            elif key == 27:  # Escape — cancel
+                curses.curs_set(0)
+                return ''
+            elif key in (curses.KEY_BACKSPACE, 127, 263):  # Backspace
+                if cursor > 0:
+                    buf.pop(cursor - 1)
+                    cursor -= 1
+            elif key == curses.KEY_DC:  # Delete
+                if cursor < len(buf):
+                    buf.pop(cursor)
+            elif key == curses.KEY_LEFT:
+                cursor = max(0, cursor - 1)
+            elif key == curses.KEY_RIGHT:
+                cursor = min(len(buf), cursor + 1)
+            elif key == curses.KEY_HOME or key == 1:  # Home or Ctrl-A
+                cursor = 0
+            elif key == curses.KEY_END or key == 5:  # End or Ctrl-E
+                cursor = len(buf)
+            elif key == 21:  # Ctrl-U — clear line
+                buf.clear()
+                cursor = 0
+            elif key == 11:  # Ctrl-K — kill to end of line
+                buf = buf[:cursor]
+            elif key == 23:  # Ctrl-W — delete word back
+                while cursor > 0 and (not buf[cursor-1].strip()):
+                    buf.pop(cursor - 1)
+                    cursor -= 1
+                while cursor > 0 and buf[cursor-1].strip():
+                    buf.pop(cursor - 1)
+                    cursor -= 1
+            elif 32 <= key <= 126 and len(buf) < max_input:  # Printable char
+                buf.insert(cursor, chr(key))
+                cursor += 1
+
+        curses.curs_set(0)
+        return ''.join(buf).strip()
+
+    def run_tool(self, tool, show_help=False):
+        """Run a tool script."""
+        script_path = os.path.join(SCRIPT_DIR, tool['script'])
+
+        if not os.path.isfile(script_path):
+            self.message = f"Error: {tool['script']} not found!"
+            return
+
+        if show_help:
+            curses.endwin()
+            print(f"\n{Col.CYAN}{Col.BOLD}{'─' * 60}")
+            print(f"  Help: {tool['name']}")
+            print(f"{'─' * 60}{Col.RESET}\n")
+            subprocess.run([sys.executable, script_path, '--help'])
+            print(f"\n{Col.DIM}Press Enter to return to the toolkit...{Col.RESET}")
+            input()
+            self.stdscr.refresh()
+            return
+
+        # ── File selection via browser ────────────────────────────────────
+        args_template = tool['quick_args']
+        needs_file = tool.get('needs_file', [])
+
+        for placeholder in needs_file:
+            if placeholder in args_template:
+                selected = self.browse_file(placeholder)
+                if selected is None:
+                    self.message = "Cancelled."
+                    return
+                args_template = args_template.replace(placeholder, selected, 1)
+
+        # ── Get remaining arguments ───────────────────────────────────────
+        args_str = self.get_user_input(
+            f"Args for {tool['name']}:",
+            args_template
+        )
+
+        if not args_str:
+            self.message = "Cancelled."
+            return
+
+        import shlex
+        try:
+            args = shlex.split(args_str)
+        except ValueError:
+            args = args_str.split()
+
+        # Execute
+        curses.endwin()
+
+        print(f"\n{Col.CYAN}{Col.BOLD}{'─' * 60}")
+        print(f"  Running: {tool['name']}")
+        print(f"  Command: python3 {tool['script']} {args_str}")
+        print(f"{'─' * 60}{Col.RESET}\n")
+
+        try:
+            subprocess.run([sys.executable, script_path] + args)
+        except KeyboardInterrupt:
+            print(f"\n{Col.YELLOW}Interrupted.{Col.RESET}")
+        except Exception as e:
+            print(f"\n{Col.RED}Error: {e}{Col.RESET}")
+
+        print(f"\n{Col.DIM}Press Enter to return to the toolkit...{Col.RESET}")
+        input()
+
+        self.stdscr = curses.initscr()
+        self.setup_colors()
+        self.stdscr.keypad(True)
+
+    def run(self):
+        self.stdscr.keypad(True)
+
+        while True:
+            self.stdscr.clear()
+            self.draw_header()
+            self.draw_footer()
+
+            if self.current_view == 'categories':
+                self.draw_categories()
+            elif self.current_view == 'tools':
+                self.draw_tools()
+
+            self.stdscr.refresh()
+
+            try:
+                key = self.stdscr.getch()
+            except KeyboardInterrupt:
+                break
+
+            self.message = ''
+
+            if key == ord('q') or key == ord('Q'):
+                break
+
+            if self.current_view == 'categories':
+                if key == curses.KEY_UP or key == ord('k'):
+                    self.selected_category = max(0, self.selected_category - 1)
+                elif key == curses.KEY_DOWN or key == ord('j'):
+                    self.selected_category = min(len(CATEGORIES) - 1, self.selected_category + 1)
+                elif key in (curses.KEY_ENTER, 10, 13, ord('l'), curses.KEY_RIGHT):
+                    self.current_view = 'tools'
+                    self.selected_tool = 0
+
+            elif self.current_view == 'tools':
+                cat = CATEGORIES[self.selected_category]
+                num_tools = len(cat['tools'])
+
+                if key == curses.KEY_UP or key == ord('k'):
+                    self.selected_tool = max(0, self.selected_tool - 1)
+                elif key == curses.KEY_DOWN or key == ord('j'):
+                    self.selected_tool = min(num_tools - 1, self.selected_tool + 1)
+                elif key in (27, curses.KEY_LEFT, ord('h')):
+                    if key == 27:
+                        self.stdscr.nodelay(True)
+                        next_key = self.stdscr.getch()
+                        self.stdscr.nodelay(False)
+                        if next_key == -1:
+                            self.current_view = 'categories'
+                    elif key == ord('h'):
+                        tool = cat['tools'][self.selected_tool]
+                        self.run_tool(tool, show_help=True)
+                    else:
+                        self.current_view = 'categories'
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    tool = cat['tools'][self.selected_tool]
+                    self.run_tool(tool)
+
+
+def list_tools():
+    """List all available tools in text mode."""
+    print(f"\n{Col.CYAN}{Col.BOLD}  ⚡ CTF Toolkit — Available Tools{Col.RESET}\n")
+
+    for cat in CATEGORIES:
+        print(f"  {Col.BOLD}{cat['name']}{Col.RESET}")
+        for tool in cat['tools']:
+            script_path = os.path.join(SCRIPT_DIR, tool['script'])
+            exists = os.path.isfile(script_path)
+            status = f"{Col.GREEN}✓{Col.RESET}" if exists else f"{Col.RED}✗{Col.RESET}"
+            print(f"    {status} {Col.BOLD}{tool['name']:20s}{Col.RESET} "
+                  f"{Col.DIM}{tool['description']}{Col.RESET}")
+            print(f"      {Col.DIM}{tool['script']}{Col.RESET}")
+        print()
+
+
+def run_tool_direct(tool_name):
+    """Run a tool directly by name, passing remaining args."""
+    for cat in CATEGORIES:
+        for tool in cat['tools']:
+            name_match = tool_name.lower().replace(' ', '_').replace('-', '_')
+            script_base = os.path.splitext(os.path.basename(tool['script']))[0]
+            tool_name_clean = tool['name'].lower().replace(' ', '_')
+
+            if name_match in (script_base, tool_name_clean):
+                script_path = os.path.join(SCRIPT_DIR, tool['script'])
+                if not os.path.isfile(script_path):
+                    print(f"{Col.RED}Error: {tool['script']} not found.{Col.RESET}")
+                    sys.exit(1)
+
+                extra_args = sys.argv[3:] if len(sys.argv) > 3 else []
+                os.execv(sys.executable, [sys.executable, script_path] + extra_args)
+
+    print(f"{Col.RED}Error: Tool '{tool_name}' not found.{Col.RESET}")
+    print(f"{Col.DIM}Use --list to see available tools.{Col.RESET}")
+    sys.exit(1)
+
+
+def main():
+    if len(sys.argv) > 1:
+        if sys.argv[1] in ('--list', '-l'):
+            list_tools()
+            return
+        elif sys.argv[1] in ('--run', '-r') and len(sys.argv) > 2:
+            run_tool_direct(sys.argv[2])
+            return
+        elif sys.argv[1] in ('--help', '-h'):
+            print(f"""
+{Col.CYAN}{Col.BOLD}  ⚡ CTF Toolkit{Col.RESET}
+
+  {Col.BOLD}Usage:{Col.RESET}
+    ctf                         Launch interactive TUI
+    ctf --list                  List all available tools
+    ctf --run <tool> [args...]  Run a tool directly
+
+  {Col.BOLD}Examples:{Col.RESET}
+    ctf --run hash_cracker 5f4dcc3b... -w rockyou.txt
+    ctf --run file_carver firmware.bin --extract
+    ctf --run jwt_cracker decode eyJhbG...
+
+  {Col.BOLD}Interactive TUI Controls:{Col.RESET}
+    ↑/↓ or j/k    Navigate menus & file browser
+    Enter or →     Select / Open directory / Confirm file
+    ← or Backspace Go up a directory
+    h              Show tool help (tools view)
+    .              Toggle hidden files (file browser)
+    /              Filter files (file browser)
+    ~              Jump to home (file browser)
+    g/G            Jump to first/last item
+    Esc            Cancel / Go back
+    q              Quit
+""")
+            return
+
+    term_size = shutil.get_terminal_size()
+    if term_size.columns < 60 or term_size.lines < 15:
+        print(f"{Col.RED}Terminal too small. Need at least 60x15, "
+              f"got {term_size.columns}x{term_size.lines}.{Col.RESET}")
+        sys.exit(1)
+
+    try:
+        curses.wrapper(lambda stdscr: CTFToolkit(stdscr).run())
+    except curses.error as e:
+        print(f"{Col.RED}Curses error: {e}{Col.RESET}")
+        print(f"{Col.DIM}Try resizing your terminal.{Col.RESET}")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
