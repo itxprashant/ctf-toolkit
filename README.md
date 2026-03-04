@@ -196,19 +196,61 @@ python3 crypto/magic_decoder.py 'nested_encodings_here' -d 15
 
 #### `cipher_solver.py` — Classical Cipher Breaker
 
-Automatically solves historical ciphers commonly found in CTF challenges.
+Automatically solves historical ciphers commonly found in CTF challenges. Includes an auto-detect mode that analyzes input and suggests the most likely cipher type.
 
-**Ciphers supported:** Caesar (all 25 shifts), Vigenère (auto key-length via Index of Coincidence), Atbash
+**Ciphers supported:**
+
+| Cipher | Subcommand | Technique |
+|--------|------------|-----------|
+| Caesar | `caesar` | Brute-forces all 25 shifts, ranked by combined Chi-squared + dictionary score |
+| ROT13 | `rot13` | Dedicated ROT13 decoder (Caesar shift 13) |
+| ROT47 | `rot47` | Rotates all printable ASCII (33-126) by 47 positions |
+| Atbash | `atbash` | Mirror substitution (A↔Z, B↔Y, ...) |
+| Affine | `affine` | Brute-forces all 312 valid (a, b) key pairs for `E(x) = (ax+b) mod 26` |
+| Vigenère | `vigenere` | Auto key-length detection via Index of Coincidence, or manual `-k KEY` |
+| Rail Fence | `railfence` | Brute-forces rail counts 2–20 for zigzag transposition |
+| Substitution | `substitution` | Frequency-analysis mapping with full cipher→plain table output |
+| Morse Code | `morse` | Decodes `./-` , unicode dots/dashes, and binary `0/1` Morse |
+| Base Encoding | `base` | Auto-detects and decodes Base16, Base32, Base64, Base85, ASCII85 |
+| Baconian | `bacon` | Decodes A/B, binary `0/1`, and case-based (upper/lower) Bacon cipher |
+| Auto-detect | `detect` | Heuristic analysis with confidence scores, auto-runs top suggestions |
+| All | `all` | Runs every cipher solver in sequence |
+
+**Scoring features:**
+- Chi-squared frequency analysis against English letter distributions
+- Dictionary validation using 180+ common English and CTF-relevant words
+- Automatic CTF flag detection (`FLAG{}`, `CTF{}`) with highlighted output
 
 ```bash
+# Auto-detect cipher type and solve
+python3 crypto/cipher_solver.py 'SGVsbG8gV29ybGQ=' detect
+
 # Try all classical ciphers at once
 python3 crypto/cipher_solver.py 'Gur synt vf cvpbPGS{ebg13}' all
 
 # Caesar only
 python3 crypto/cipher_solver.py 'Khoor Zruog' caesar
 
+# ROT13
+python3 crypto/cipher_solver.py 'Uryyb Jbeyq' rot13
+
+# Affine cipher brute-force
+python3 crypto/cipher_solver.py 'Fuuiqn Njkxg' affine
+
 # Vigenère with a known key
 python3 crypto/cipher_solver.py 'LXFOPVEFRNHR' vigenere -k LEMON
+
+# Rail Fence
+python3 crypto/cipher_solver.py 'Horel ollWd' railfence
+
+# Morse code
+python3 crypto/cipher_solver.py '.... . .-.. .-.. --- / .-- --- .-. .-.. -..' morse
+
+# Base encoding detection
+python3 crypto/cipher_solver.py 'Q1RGe2Jhc2U2NF9pc19lYXN5fQ==' base
+
+# Baconian cipher (A/B groups)
+python3 crypto/cipher_solver.py 'AABBB AABAA ABABB ABABB ABBBA' bacon
 
 # From a file
 python3 crypto/cipher_solver.py @challenge.txt all
