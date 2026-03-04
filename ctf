@@ -75,14 +75,14 @@ CATEGORIES = [
             {
                 'name': 'Advanced Stego',
                 'script': 'forensics/advanced_zsteg.py',
-                'description': 'zsteg-like multi-channel, multi-bit LSB/MSB extraction',
+                'description': 'zsteg clone — LSB/MSB all channels, PNG chunks, auto-extract',
                 'quick_args': '<image>',
                 'needs_file': ['<image>'],
             },
             {
                 'name': 'Audio Stego',
                 'script': 'forensics/audio_steg.py',
-                'description': 'High-res spectrograms and WAV LSB extraction',
+                'description': 'Spectrograms, LSB, DTMF decoder, Morse audio, reverse',
                 'quick_args': '<file> -s -l',
                 'needs_file': ['<file>'],
             },
@@ -151,33 +151,33 @@ CATEGORIES = [
     },
     {
         'name': '🔑 Cryptography',
-        'description': 'RSA attacks, XOR decryptor, encoding/decoding, classical ciphers',
+        'description': 'RSA, XOR, encodings, classical ciphers, FactorDB, Pollard',
         'tools': [
             {
                 'name': 'RSA Toolkit',
                 'script': 'crypto/rsa_toolkit.py',
-                'description': 'Wiener\'s attack, Fermat\'s, Small e, Common Modulus',
+                'description': 'Wiener, Fermat, Pollard, FactorDB, Hastad, PEM parse',
                 'quick_args': 'single -n <n> -e <e> -c <c>',
                 'needs_file': [],
             },
             {
                 'name': 'XOR Bruteforcer',
                 'script': 'crypto/xor_bruteforcer.py',
-                'description': 'Single-byte frequency analysis, repeating key cracking',
+                'description': 'Freq analysis, repeating key, crib drag, two-time pad',
                 'quick_args': '<file> single',
                 'needs_file': ['<file>'],
             },
             {
                 'name': 'Magic Decoder',
                 'script': 'crypto/magic_decoder.py',
-                'description': 'Recursive try: Base64/32/58, Hex, Decimal, ROT13, URL',
+                'description': 'Recursive: B64/32/58, Hex, ROT13/47, Morse, Braille, Tap',
                 'quick_args': '<file_or_string>',
                 'needs_file': [],
             },
             {
                 'name': 'Classical Ciphers',
                 'script': 'crypto/cipher_solver.py',
-                'description': 'Auto-solve Caesar, Vigenère (IoC), and Atbash',
+                'description': 'Caesar, Vigenère, Atbash, Rail Fence, Affine, ROT',
                 'quick_args': '<file_or_string> all',
                 'needs_file': [],
             },
@@ -185,19 +185,19 @@ CATEGORIES = [
     },
     {
         'name': '🌐 Web Exploitation',
-        'description': 'LFI scanner, SQL injection detector',
+        'description': 'LFI/RFI scanner, SQLi detector (GET/POST, header injection)',
         'tools': [
             {
                 'name': 'LFI Scanner',
                 'script': 'web/lfi_scanner.py',
-                'description': 'Path traversal payloads, nullbyte injection, PHP wrappers',
+                'description': 'Traversal, nullbyte, PHP wrappers, POST, custom wordlist',
                 'quick_args': "'http://target.com/?page=INJECT'",
                 'needs_file': [],
             },
             {
                 'name': 'SQLi Probe',
                 'script': 'web/sqli_probe.py',
-                'description': 'Error-based and Time-based blind SQLi detection',
+                'description': 'Error/Time/Boolean/UNION SQLi, header inject, POST',
                 'quick_args': "'http://target.com/item.php?id=INJECT'",
                 'needs_file': [],
             },
@@ -205,19 +205,19 @@ CATEGORIES = [
     },
     {
         'name': '📡 Network Analysis',
-        'description': 'PCAP file extraction, USB PCAP forensics',
+        'description': 'PCAP forensics, TCP streams, DNS exfil, ICMP, USB HID',
         'tools': [
             {
                 'name': 'PCAP Extractor',
                 'script': 'network/pcap_extractor.py',
-                'description': 'Dump DNS, plaintext HTTP/FTP credentials, HTTP files',
+                'description': 'DNS, creds, HTTP files, TCP streams, ICMP exfil, stats',
                 'quick_args': '<file>',
                 'needs_file': ['<file>'],
             },
             {
                 'name': 'USB HID Parser',
                 'script': 'network/usb_hid_parser.py',
-                'description': 'Reconstruct keyboard keystrokes and plot mouse movements',
+                'description': 'Keystrokes (Ctrl/Shift/Caps), mouse plot, hex file input',
                 'quick_args': '<file> -k -m',
                 'needs_file': ['<file>'],
             },

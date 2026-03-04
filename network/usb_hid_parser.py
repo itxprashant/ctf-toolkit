@@ -3,20 +3,22 @@
 usb_hid_parser.py - CTF USB Packet Forensics Toolkit
 
 Translates USB HID Leftover Capture Data from PCAPs:
-- Reconstructs keyboard keystrokes (handles shift/caps lock).
-- Plots mouse movements to reveal drawn objects/text.
+- Reconstructs keyboard keystrokes (handles shift/caps lock/ctrl)
+- Plots mouse movements to reveal drawn objects/text
+- Supports raw hex file input (tshark extracted)
+- Detects and labels modifier combos (Ctrl+C, Alt+Tab etc.)
 """
 
 import argparse
 import sys
 import os
+import re
 
 try:
     from scapy.all import rdpcap
+    HAS_SCAPY = True
 except ImportError:
-    print("\033[91mError: scapy not installed.\033[0m")
-    print("Please install it running: pip install scapy")
-    sys.exit(1)
+    HAS_SCAPY = False
 
 # ANSI colors
 class C:
@@ -29,8 +31,7 @@ class C:
     DIM     = '\033[2m'
     RESET   = '\033[0m'
 
-# standard USB keyboard map (HID codes)
-# Maps byte code to (lowercase_char, uppercase_char)
+# USB HID keyboard map
 KEYBOARD_MAP = {
     4: ('a', 'A'), 5: ('b', 'B'), 6: ('c', 'C'), 7: ('d', 'D'),
     8: ('e', 'E'), 9: ('f', 'F'), 10: ('g', 'G'), 11: ('h', 'H'),
@@ -42,227 +43,331 @@ KEYBOARD_MAP = {
     30: ('1', '!'), 31: ('2', '@'), 32: ('3', '#'), 33: ('4', '$'),
     34: ('5', '%'), 35: ('6', '^'), 36: ('7', '&'), 37: ('8', '*'),
     38: ('9', '('), 39: ('0', ')'),
-    40: ('[ENTER]\n', '[ENTER]\n'), 41: ('[ESC]', '[ESC]'), 
-    42: ('[BACKSPACE]', '[BACKSPACE]'), 43: ('[TAB]', '[TAB]'),
+    40: ('\n', '\n'), 41: ('[ESC]', '[ESC]'),
+    42: ('[BKSP]', '[BKSP]'), 43: ('\t', '\t'),
     44: (' ', ' '), 45: ('-', '_'), 46: ('=', '+'), 47: ('[', '{'),
     48: (']', '}'), 49: ('\\', '|'), 51: (';', ':'), 52: ("'", '"'),
     53: ('`', '~'), 54: (',', '<'), 55: ('.', '>'), 56: ('/', '?'),
     57: ('[CAPSLOCK]', '[CAPSLOCK]'),
+    58: ('[F1]', '[F1]'), 59: ('[F2]', '[F2]'), 60: ('[F3]', '[F3]'),
+    61: ('[F4]', '[F4]'), 62: ('[F5]', '[F5]'), 63: ('[F6]', '[F6]'),
+    64: ('[F7]', '[F7]'), 65: ('[F8]', '[F8]'), 66: ('[F9]', '[F9]'),
+    67: ('[F10]', '[F10]'), 68: ('[F11]', '[F11]'), 69: ('[F12]', '[F12]'),
+    73: ('[INS]', '[INS]'), 74: ('[HOME]', '[HOME]'), 75: ('[PGUP]', '[PGUP]'),
+    76: ('[DEL]', '[DEL]'), 77: ('[END]', '[END]'), 78: ('[PGDN]', '[PGDN]'),
+    79: ('[RIGHT]', '[RIGHT]'), 80: ('[LEFT]', '[LEFT]'),
+    81: ('[DOWN]', '[DOWN]'), 82: ('[UP]', '[UP]'),
     # Numpad
     89: ('1', '1'), 90: ('2', '2'), 91: ('3', '3'), 92: ('4', '4'),
     93: ('5', '5'), 94: ('6', '6'), 95: ('7', '7'), 96: ('8', '8'),
-    97: ('9', '9'), 98: ('0', '0')
+    97: ('9', '9'), 98: ('0', '0'), 99: ('.', '.'),
+    85: ('*', '*'), 86: ('-', '-'), 87: ('+', '+'), 88: ('\n', '\n'),
 }
 
 has_matplotlib = True
 try:
+    import matplotlib
+    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 except ImportError:
     has_matplotlib = False
 
 
-def extract_usb_data(pcap_file):
-    """Extract Leftover Capture Data / USB URB data from packets."""
-    packets = rdpcap(pcap_file)
-    usb_data = []
-    
-    # Simple heuristic to find USB interrupt IN payloads
-    # Usually length 8 for keyboard, 4 for basic mouse
-    for pkt in packets:
-        raw = bytes(pkt)
-        # Attempt to isolate the USB data payload at the end of the frame.
-        # This is a generic approach since USB pcap encapsulations vary greatly 
-        # (usb.capdata vs usb.urb_data vs usb.leftover).
-        # Typically the actual HID data is the last 8 bytes or 4 bytes.
-        
-        # Look for length 8 (kbd) or 4 (mouse) payloads
-        if len(raw) >= 8:
-            # check back from end. Keyboard: 00 00 [key] 00 00 00 00 00
-            if len(raw) > 27: 
-                # USB URB often has 27-64 bytes header
-                payload = raw[-8:] # Keyboard
-                if len(payload) == 8 and payload[2] != 0:
-                    usb_data.append(payload)
-                elif len(raw[-4:]) == 4: # Mouse
-                    usb_data.append(raw[-4:])
-    
-    return usb_data
+def load_from_pcap(pcap_file):
+    """Extract USB data from a PCAP file using tshark first, then scapy."""
+    # Try tshark first (most accurate)
+    data_8 = _tshark_extract(pcap_file, 'usb.capdata', 'usb.transfer_type == 0x01')
+    if data_8 is None:
+        data_8 = _tshark_extract(pcap_file, 'usbhid.data', '')
+    if data_8 is None and HAS_SCAPY:
+        data_8 = _scapy_extract(pcap_file)
+    if data_8 is None:
+        data_8 = []
+    return data_8
 
-def usb_tshark_extract(pcap_file, filter_str):
-    """It's much more reliable to use tshark if installed for USB data."""
+
+def _tshark_extract(pcap_file, field, display_filter):
+    """Use tshark to extract USB data fields."""
     import subprocess
-    cmd = ['tshark', '-r', pcap_file, '-Y', filter_str, '-T', 'fields', '-e', 'usb.capdata']
+    cmd = ['tshark', '-r', pcap_file, '-T', 'fields', '-e', field]
+    if display_filter:
+        cmd.extend(['-Y', display_filter])
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        lines = result.stdout.strip().split('\n')
-        # Tshark outputs hex with colons '00:00:1c:...'
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return None
+        lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
         parsed = []
         for line in lines:
-            if line:
+            try:
                 parsed.append(bytes.fromhex(line.replace(':', '')))
-        return parsed
+            except:
+                pass
+        return parsed if parsed else None
     except Exception:
         return None
 
 
-def parse_keyboard(pcap_file):
+def _scapy_extract(pcap_file):
+    """Fallback: extract from scapy raw packets."""
+    packets = rdpcap(pcap_file)
+    usb_data = []
+    for pkt in packets:
+        raw = bytes(pkt)
+        if len(raw) >= 8:
+            payload = raw[-8:]
+            if len(payload) == 8 and payload[2] != 0:
+                usb_data.append(payload)
+    return usb_data
+
+
+def load_from_hex_file(hex_file):
+    """Load pre-extracted hex data from a text file (one packet per line)."""
+    data = []
+    with open(hex_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            try:
+                data.append(bytes.fromhex(line.replace(':', '').replace(' ', '').replace('0x', '')))
+            except:
+                pass
+    return data
+
+
+# ─── Keyboard Parser ─────────────────────────────────────────────────────────
+
+def parse_keyboard(data, raw_output=False):
     """Reconstruct keystrokes from USB keyboard packets."""
     print(f"\n{C.CYAN}{C.BOLD}─── USB Keyboard Keystrokes ───────────────────────────────────{C.RESET}")
-    
-    # Try tshark first as it accurately extracts exactly usb.capdata
-    data = usb_tshark_extract(pcap_file, 'usb.transfer_type == 0x01 and frame.len == 35')
-    if data is None:
-        print(f"  {C.YELLOW}Warning: tshark not found or failed. Using loose scapy extraction.{C.RESET}")
-        raw_data = extract_usb_data(pcap_file)
-        data = [d for d in raw_data if len(d) == 8]
-    else:
-        # Filter purely for length 8 keyboard packets
-        data = [d for d in data if len(d) == 8]
-        
-    if not data:
-        print(f"  {C.DIM}No USB keyboard data found.{C.RESET}")
-        return
+
+    kbd_data = [d for d in data if len(d) == 8]
+    if not kbd_data:
+        print(f"  {C.DIM}No USB keyboard data found (need 8-byte packets).{C.RESET}")
+        return ""
 
     output = ""
-    shift_pressed = False
+    raw_events = []
     caps_lock = False
-    
-    for packet in data:
-        mod = packet[0] # Modifiers byte
-        key = packet[2] # Keycode byte
-        
-        if key == 0:
+    prev_key = 0
+
+    for packet in kbd_data:
+        mod = packet[0]
+        key = packet[2]
+
+        if key == 0 or key == prev_key:
+            prev_key = key
             continue
-            
-        # Modifiers: bit 1 = Left Shift, bit 5 = Right Shift
-        shift_pressed = (mod & 0x02) or (mod & 0x20)
-        
+        prev_key = key
+
+        shift_pressed = bool(mod & 0x22)  # Left or Right Shift
+        ctrl_pressed = bool(mod & 0x11)   # Left or Right Ctrl
+        alt_pressed = bool(mod & 0x44)    # Left or Right Alt
+
+        if key == 57:  # CAPS LOCK
+            caps_lock = not caps_lock
+            if raw_output:
+                raw_events.append('[CAPSLOCK]')
+            continue
+
         if key in KEYBOARD_MAP:
-            if key == 57: # CAPS LOCK
-                caps_lock = not caps_lock
-                continue
-                
             char_tuple = KEYBOARD_MAP[key]
-            
-            # Apply shift/caps lock rules
-            if char_tuple[0].isalpha():
+
+            # Modifier combos
+            if ctrl_pressed and key in KEYBOARD_MAP:
+                combo = f"[Ctrl+{char_tuple[1]}]"
+                raw_events.append(combo)
+                # Don't add to output for Ctrl combos
+                continue
+            if alt_pressed and key in KEYBOARD_MAP:
+                raw_events.append(f"[Alt+{char_tuple[1]}]")
+                continue
+
+            if char_tuple[0].isalpha() and len(char_tuple[0]) == 1:
                 use_upper = shift_pressed ^ caps_lock
             else:
                 use_upper = shift_pressed
-                
+
             char = char_tuple[1] if use_upper else char_tuple[0]
-            
-            if char == '[BACKSPACE]':
+
+            if char == '[BKSP]':
+                raw_events.append('[BKSP]')
                 output = output[:-1]
-            elif char in ('[ENTER]\n', '[TAB]', '[ESC]'):
-                output += char
+            elif char == '[DEL]':
+                raw_events.append('[DEL]')
+            elif char.startswith('[') and char.endswith(']'):
+                raw_events.append(char)
             else:
+                raw_events.append(char)
                 output += char
+        else:
+            raw_events.append(f'[0x{key:02x}]')
 
-    print(f"\n{C.BOLD}Raw Output:{C.RESET}")
+    if raw_output:
+        print(f"\n{C.BOLD}Raw Events:{C.RESET}")
+        print(''.join(raw_events))
+
+    print(f"\n{C.BOLD}Reconstructed Text:{C.RESET}")
     print(output)
+
+    # Check for flags
+    import re
+    flags = re.findall(r'(?:flag|ctf|picoctf|htb)\{[^}]+\}', output, re.IGNORECASE)
+    if flags:
+        for f in flags:
+            print(f"\n  {C.RED}{C.BOLD}⚑ FLAG: {f}{C.RESET}")
+
     print()
+    return output
 
 
-def parse_mouse(pcap_file, out_file):
+# ─── Mouse Parser ────────────────────────────────────────────────────────────
+
+def parse_mouse(data, out_file, show_all=False):
     """Reconstruct mouse movements and draw them."""
     print(f"\n{C.CYAN}{C.BOLD}─── USB Mouse Movements ───────────────────────────────────────{C.RESET}")
-    
+
     if not has_matplotlib:
-        print(f"  {C.RED}Error: matplotlib is required to plot mouse movements.{C.RESET}")
-        print(f"  {C.DIM}Install it: pip install matplotlib{C.RESET}")
+        print(f"  {C.RED}Error: matplotlib required. pip install matplotlib{C.RESET}")
         return
 
-    # Try tshark first
-    data = usb_tshark_extract(pcap_file, 'usb.transfer_type == 0x01 and frame.len == 31')
-    if data is None:
-        raw_data = extract_usb_data(pcap_file)
-        data = [d for d in raw_data if len(d) == 4]
-    else:
-        # Filter for length 4 mouse packets
-        data = [d for d in data if len(d) == 4]
-
-    if not data:
+    mouse_data = [d for d in data if len(d) in (3, 4, 5, 6, 7, 8)]
+    if not mouse_data:
         print(f"  {C.DIM}No USB mouse data found.{C.RESET}")
         return
 
     x_pos = 0
     y_pos = 0
-    
-    X = []
-    Y = []
-    
-    for packet in data:
-        # standard 4-byte mouse packet
-        # Byte 0: Button status (bit 0 = left click)
-        # Byte 1: X movement (signed 8-bit)
-        # Byte 2: Y movement (signed 8-bit)
-        # Byte 3: Wheel movement
-        
+
+    # Separate clicked vs all movement
+    X_click = []
+    Y_click = []
+    X_all = []
+    Y_all = []
+
+    for packet in mouse_data:
+        if len(packet) < 3:
+            continue
+
         btn = packet[0]
         dx = packet[1]
         dy = packet[2]
-        
-        # Convert to signed int
+
         if dx > 127: dx -= 256
         if dy > 127: dy -= 256
-            
+
         x_pos += dx
         y_pos += dy
-        
-        # Only plot if left click is held down (drawing)
-        if btn == 1:
-            X.append(x_pos)
-            # Y is inverted in screen coords vs math coords
-            Y.append(-y_pos)  
 
-    if not X:
-        print(f"  {C.DIM}Mouse data found, but no 'drawing' (left-click drag) occurred.{C.RESET}")
-        return
+        X_all.append(x_pos)
+        Y_all.append(-y_pos)
+
+        if btn & 1:  # Left click held
+            X_click.append(x_pos)
+            Y_click.append(-y_pos)
 
     img_path = out_file if out_file else 'mouse_movement.png'
-    
-    plt.figure(figsize=(10, 6))
-    # Scatter plot, because lines might connect between separate letter drawing strokes
-    plt.scatter(X, Y, s=5, c='blue', alpha=0.5)
-    plt.axis('off')
-    plt.savefig(img_path)
-    
-    print(f"  {C.GREEN}▶ Plot saved to:{C.RESET} {img_path}")
-    print(f"  {C.DIM}Open this image to see what was drawn (often text/flags).{C.RESET}")
-    print()
 
+    fig, axes = plt.subplots(1, 2 if show_all else 1, figsize=(16 if show_all else 10, 6))
+
+    if show_all:
+        ax1, ax2 = axes
+        ax1.scatter(X_click, Y_click, s=3, c='blue', alpha=0.5)
+        ax1.set_title('Left-Click Drawing')
+        ax1.axis('off')
+
+        ax2.plot(X_all, Y_all, linewidth=0.5, color='gray', alpha=0.3)
+        ax2.scatter(X_click, Y_click, s=3, c='red', alpha=0.7)
+        ax2.set_title('All Movement + Clicks')
+        ax2.axis('off')
+    else:
+        ax = axes if not show_all else axes[0]
+        if X_click:
+            ax.scatter(X_click, Y_click, s=3, c='blue', alpha=0.5)
+            ax.set_title('Left-Click Drawing')
+        else:
+            ax.plot(X_all, Y_all, linewidth=0.5, color='blue', alpha=0.5)
+            ax.set_title('All Mouse Movement (no clicks detected)')
+        ax.axis('off')
+
+    plt.tight_layout()
+    plt.savefig(img_path, dpi=200)
+    plt.close()
+
+    click_info = f" ({len(X_click)} click points)" if X_click else " (no clicks, showing all movement)"
+    print(f"  {C.GREEN}▶ Plot saved to:{C.RESET} {img_path}{click_info}")
+    print(f"  {C.DIM}Open this image to see what was drawn.{C.RESET}\n")
+
+
+# ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
         description='CTF USB Packet Forensics Toolkit',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Requires 'tshark' (from Wireshark) to be installed in your PATH for highest accuracy.
-Otherwise falls back to scapy heuristic matching.
+Input formats:
+  PCAP file     - Uses tshark (preferred) or scapy to extract USB data
+  Hex text file - One hex packet per line (tshark pre-extracted output)
+
+Examples:
+  %(prog)s usb.pcap -k           # Keyboard keystrokes from PCAP
+  %(prog)s usb.pcap -m           # Mouse movement plot
+  %(prog)s usb.pcap -k --raw     # Show raw events (backspaces, modifiers)
+  %(prog)s data.txt --hex -k     # From pre-extracted hex file
+  %(prog)s usb.pcap -m --all     # Show both click-only and full movement plots
 """)
-    
-    parser.add_argument('pcap', help='Path to USB PCAP/PCAPNG file')
-    
-    parser.add_argument('--keyboard', '-k', action='store_true', help='Reconstruct keyboard keystrokes')
-    parser.add_argument('--mouse', '-m', action='store_true', help='Reconstruct mouse drawing')
-    parser.add_argument('--plot', '-p', default='', help='Output file for mouse plot (default: mouse_movement.png)')
+
+    parser.add_argument('input', help='PCAP file or hex text file (with --hex)')
+    parser.add_argument('--hex', action='store_true', help='Input is a text file with hex packets (one per line)')
+
+    parser.add_argument('-k', '--keyboard', action='store_true', help='Reconstruct keyboard keystrokes')
+    parser.add_argument('-m', '--mouse', action='store_true', help='Reconstruct mouse drawing')
+    parser.add_argument('-p', '--plot', default='', help='Output file for mouse plot')
+    parser.add_argument('--raw', action='store_true', help='Show raw keyboard events including modifiers')
+    parser.add_argument('--all', action='store_true', help='For mouse: show both click and full movement')
+    parser.add_argument('-o', '--output', help='Save keyboard output to text file')
 
     args = parser.parse_args()
-    
-    if not os.path.isfile(args.pcap):
-        print(f"{C.RED}Error: File '{args.pcap}' not found.{C.RESET}")
+
+    if not os.path.isfile(args.input):
+        print(f"{C.RED}Error: File '{args.input}' not found.{C.RESET}")
         sys.exit(1)
 
-    print(f"\n  {C.BOLD}Analyzing USB Capture: {args.pcap}{C.RESET}")
-    
+    print(f"\n  {C.BOLD}Analyzing USB Capture: {args.input}{C.RESET}")
+
+    # Load data
+    if args.hex:
+        data = load_from_hex_file(args.input)
+    else:
+        if not HAS_SCAPY:
+            import subprocess
+            try:
+                subprocess.run(['tshark', '--version'], capture_output=True, check=True)
+            except:
+                print(f"{C.RED}Error: Neither scapy nor tshark available.{C.RESET}")
+                print(f"Install one: pip install scapy  OR  sudo apt install tshark")
+                sys.exit(1)
+        data = load_from_pcap(args.input)
+
+    if not data:
+        print(f"  {C.RED}No USB HID data extracted from input.{C.RESET}")
+        sys.exit(1)
+
+    print(f"  {C.DIM}Extracted {len(data)} packets{C.RESET}")
+
     run_all = not (args.keyboard or args.mouse)
-    
+
     if args.keyboard or run_all:
-        parse_keyboard(args.pcap)
-        
+        text = parse_keyboard(data, args.raw)
+        if args.output and text:
+            with open(args.output, 'w') as f:
+                f.write(text)
+            print(f"  {C.GREEN}Saved keyboard output to: {args.output}{C.RESET}")
+
     if args.mouse or run_all:
-        parse_mouse(args.pcap, args.plot)
+        parse_mouse(data, args.plot, args.all)
 
 
 if __name__ == '__main__':
