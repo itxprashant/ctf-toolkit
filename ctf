@@ -223,6 +223,33 @@ CATEGORIES = [
             },
         ],
     },
+    {
+        'name': '👁️ OSINT & Recon',
+        'description': 'Username hunting, EXIF mapping, Subdomain enumeration',
+        'tools': [
+            {
+                'name': 'Sherlock Lite',
+                'script': 'osint/sherlock_lite.py',
+                'description': 'Concurrent username enumerator across 50+ platforms',
+                'quick_args': '<username>',
+                'needs_file': [],
+            },
+            {
+                'name': 'EXIF Mapper',
+                'script': 'osint/exif_mapper.py',
+                'description': 'Extracts image GPS coords to an interactive HTML map',
+                'quick_args': '<dir>',
+                'needs_file': ['<dir>'],
+            },
+            {
+                'name': 'Subdomain Enumerator',
+                'script': 'osint/subdomain_enum.py',
+                'description': 'Fast threaded DNS/CNAME resolver with default wordlist',
+                'quick_args': '<domain>',
+                'needs_file': [],
+            },
+        ],
+    },
 ]
 
 # ─── ANSI for non-curses output ───────────────────────────────────────────────

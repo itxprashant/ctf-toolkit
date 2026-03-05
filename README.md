@@ -18,6 +18,7 @@ A comprehensive, automated, and interactive Python toolkit designed to quickly s
   - [🔑 Cryptography](#-cryptography-crypto)
   - [🌐 Web Exploitation](#-web-exploitation-web)
   - [📡 Network Analysis](#-network--packet-analysis-network)
+  - [👁️ OSINT & Recon](#️-osint--recon-osint)
   - [🕵️ Forensics & Steganography](#️-forensics--steganography-forensics)
   - [🔓 Password Brute Force](#-password-brute-force-bruteforce)
   - [🔬 Binary Analysis](#-binary-analysis-carving)
@@ -29,7 +30,7 @@ A comprehensive, automated, and interactive Python toolkit designed to quickly s
 
 ## Features
 
-- **20+ specialized tools** organized into 7 categories
+- **20+ specialized tools** organized into 8 categories
 - **Interactive TUI Launcher** — browse and run tools from a beautiful `curses`-based interface
 - **Integrated File Browser** — a `ranger`/`yazi`-like file selector that pops up when a tool needs a file argument
 - **Flag Detection** — most tools automatically highlight text matching common CTF flag formats (`flag{}`, `CTF{}`, `picoCTF{}`, `HTB{}`, etc.)
@@ -64,15 +65,16 @@ The core forensics and brute-force tools work with Python standard library only.
 ```bash
 # Required for full functionality
 pip3 install pycryptodome   # RSA math (crypto/rsa_toolkit.py)
-pip3 install scapy          # PCAP parsing (network/pcap_extractor.py, usb_hid_parser.py)
-pip3 install requests       # HTTP requests (web/lfi_scanner.py, sqli_probe.py)
-pip3 install matplotlib     # Plotting (forensics/audio_steg.py, network/usb_hid_parser.py)
-pip3 install scipy          # Audio analysis (forensics/audio_steg.py)
-pip3 install numpy          # Numerical ops (forensics/audio_steg.py)
-pip3 install Pillow         # Image processing (forensics/advanced_zsteg.py)
+pip3 install scapy          # PCAP parsing
+pip3 install requests       # HTTP requests
+pip3 install matplotlib     # Plotting 
+pip3 install scipy          # Audio analysis
+pip3 install numpy          # Numerical ops
+pip3 install Pillow         # Image processing
+pip3 install dnspython      # CNAME parsing (osint/subdomain_enum.py)
 
 # Or install everything at once:
-pip3 install pycryptodome scapy requests matplotlib scipy numpy Pillow
+pip3 install pycryptodome scapy requests matplotlib scipy numpy Pillow dnspython
 ```
 
 ### 2. System Dependencies (Optional but Recommended)
@@ -317,6 +319,41 @@ python3 network/usb_hid_parser.py usb.pcap -k -o typed.txt    # Save keystrokes 
 
 ---
 
+### 👁️ OSINT & Recon (`osint/`)
+
+#### `sherlock_lite.py` — Concurrent Username Enumerator
+
+Hunts down social media and developer profiles across 50+ platforms simultaneously using `ThreadPoolExecutor`.
+
+```bash
+python3 osint/sherlock_lite.py hacker_name
+python3 osint/sherlock_lite.py target_dev --threads 20 -o found.txt
+```
+
+---
+
+#### `exif_mapper.py` — Geographic Metadata Visualizer
+
+Scans directories for images, extracts GPS coordinates, and automatically builds an interactive `Leaflet.js` HTML map with pins. Uses `exiftool` with a `Pillow` fallback.
+
+```bash
+python3 osint/exif_mapper.py ./suspect_photos/ -o map.html
+python3 osint/exif_mapper.py target.jpg
+```
+
+---
+
+#### `subdomain_enum.py` — Fast Subdomain Resolver
+
+A threaded DNS resolver to find hidden infrastructure. Has a built-in top 100 wordlist, handles Wildcard DNS detection, and extracts CNAME records (if `dnspython` is installed).
+
+```bash
+python3 osint/subdomain_enum.py target.com
+python3 osint/subdomain_enum.py target.htb -w custom_subs.txt
+```
+
+---
+
 ### 🕵️ Forensics & Steganography (`forensics/`)
 
 #### `metadata_extractor.py` — Exhaustive Metadata Dumper
@@ -432,6 +469,11 @@ ctf-scripts/
 ├── network/                     # Network forensics tools
 │   ├── pcap_extractor.py        #   PCAP analyzer (DNS, creds, streams, ICMP, exfil)
 │   └── usb_hid_parser.py        #   USB HID (keyboard + mouse from PCAPs or hex files)
+│
+├── osint/                       # OSINT & Recon tools
+│   ├── sherlock_lite.py         #   Username enumerator (50+ platforms)
+│   ├── exif_mapper.py           #   GPS to interactive Leaflet Map
+│   └── subdomain_enum.py        #   Concurrent DNS/CNAME brute forcer
 │
 ├── forensics/                   # Forensics & steganography tools
 │   ├── file_analyzer.py         #   File type detection and entropy
